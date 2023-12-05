@@ -7,6 +7,32 @@ from models import BertRNN
 from sklearn.metrics import accuracy_score
 import copy
 
+def f1(y_true, y_pred):
+    y_pred = torch.round(y_pred)
+    tp = torch.sum((y_true * y_pred).float(), dim=0)
+    tn = torch.sum(((1 - y_true) * (1 - y_pred)).float(), dim=0)
+    fp = torch.sum(((1 - y_true) * y_pred).float(), dim=0)
+    fn = torch.sum((y_true * (1 - y_pred)).float(), dim=0)
+
+    p = tp / (tp + fp + 1e-7)
+    r = tp / (tp + fn + 1e-7)
+
+    f1 = 2 * p * r / (p + r + 1e-7)
+    f1 = torch.where(torch.isnan(f1), torch.zeros_like(f1), f1)
+    return torch.mean(f1)
+
+def f1_loss(y_true, y_pred):
+    tp = torch.sum((y_true * y_pred).float(), dim=0)
+    tn = torch.sum(((1 - y_true) * (1 - y_pred)).float(), dim=0)
+    fp = torch.sum(((1 - y_true) * y_pred).float(), dim=0)
+    fn = torch.sum((y_true * (1 - y_pred)).float(), dim=0)
+
+    p = tp / (tp + fp + 1e-7)
+    r = tp / (tp + fn + 1e-7)
+
+    f1 = 2 * p * r / (p + r + 1e-7)
+    f1 = torch.where(torch.isnan(f1), torch.zeros_like(f1), f1)
+    return 1 - torch.mean(f1)
 
 class Engine:
     def __init__(self, args):
@@ -85,16 +111,16 @@ class Engine:
                 best_state_dict = copy.deepcopy(self.model.state_dict())
             if test_acc > best_acc:
                 best_acc = test_acc
-            print(f'Epoch {epoch + 1}\tTrain Loss: {loss:.3f}\tVal Acc: {acc:.3f}\tTest Acc: {test_acc:.3f}\n'
-                  f'Best Epoch: {best_epoch + 1}\tBest Epoch Val Acc: {best_epoch_acc:.3f}\t'
-                  f'Best Epoch Test Acc: {best_epoch_test_acc:.3f}, Best Test Acc: {best_acc:.3f}\n')
+            print(f'Epoch {epoch + 1}\tTrain Loss: {loss:.3f}\tVal Acc(f1): {acc:.3f}\tTest Acc(f1): {test_acc:.3f}\n'
+                  f'Best Epoch: {best_epoch + 1}\tBest Epoch Val Acc(f1): {best_epoch_acc:.3f}\t'
+                  f'Best Epoch Test Acc(f1): {best_epoch_test_acc:.3f}, Best Test Acc(f1): {best_acc:.3f}\n')
             if epoch - best_epoch >= 10:
                 break
 
         print('Saving the best checkpoint....')
         torch.save(best_state_dict, f"ckp/model_{self.args.corpus}.pt")
         self.model.load_state_dict(best_state_dict)
-        acc = self.eval(False)
+        acc = self.eval(True)
         print(f'Test Acc: {acc:.3f}')
 
     def train_epoch(self):
@@ -111,7 +137,8 @@ class Engine:
             outputs = self.model(input_ids, attention_mask, chunk_lens, speaker_ids,
                                  topic_labels)
             labels = labels.reshape(-1)
-            loss_act = self.criterion(outputs, labels)
+            # loss_act = self.criterion(outputs, labels)
+            loss_act = f1_loss(outputs, labels)
             loss = loss_act
             loss.backward()
             self.optimizer.step()
@@ -145,13 +172,14 @@ class Engine:
 
         mask = y_true != -1
         acc = accuracy_score(y_true[mask], y_pred[mask])
+        f1_score = f1(y_pred, y_true)
 
         if inference:
             # print(f"ypred len = {len(y_pred)}")
             import pickle
             pickle.dump(y_pred[mask].tolist(), open('preds_on_new.pkl', 'wb'))
 
-        return acc
+        return f1_score
 
     def inference(self):
         ## using the trained model to inference on a new unseen dataset
@@ -163,6 +191,34 @@ class Engine:
         # make predictions
         self.eval(val=False, inference=True)
 
+    def test(self):
+        ## using the trained model to inference on the test dataset
+        # load the saved checkpoint
+        # change the model name to whatever the checkpoint is named
+        self.model.load_state_dict(torch.load('ckp/model_inlp.pt'))
+
+        # make predictions
+        # self.eval(val=False, inference=True)
+        self.model.eval()
+        y_pred = []
+        loader = self.test_loader
+        with torch.no_grad():
+            for i, batch in enumerate(loader):
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                labels = batch['labels'].to(self.device)
+                chunk_lens = batch['chunk_lens']
+                speaker_ids = batch['speaker_ids'].to(self.device)
+                topic_labels = batch['topic_labels'].to(self.device)
+                outputs = self.model(input_ids, attention_mask, chunk_lens, speaker_ids, topic_labels)
+                y_pred.append(outputs.detach().to('cpu').numpy())
+                labels = labels.reshape(-1)
+                y_true.append(labels.detach().to('cpu').numpy())
+
+        y_pred = np.concatenate(y_pred, axis=0)
+        import pickle
+        pickle.dump(y_pred.tolist(), open('preds_on_new.pkl', 'wb'))
+        
 
 if __name__ == '__main__':
     import argparse
